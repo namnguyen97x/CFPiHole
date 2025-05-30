@@ -58,12 +58,12 @@ class App:
             os.makedirs("./tmp", exist_ok=True)
 
             all_domains = []
-            for list in config["Lists"]:
-                print ("Setting list " +  list)
-                name_prefix = f"[AdBlock-{list}]"
+            for list_name in config["Lists"]:
+                print ("Setting list " +  list_name)
+                name_prefix = f"[AdBlock-{list_name}]"
 
-                self.download_file(config["Lists"][list], list)
-                domains = self.convert_to_domain_list(list)
+                self.download_file(config["Lists"][list_name], list_name)
+                domains = self.convert_to_domain_list(list_name)
                 all_domains = all_domains + domains
 
             unique_domains = pd.unique(all_domains)
