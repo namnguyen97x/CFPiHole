@@ -26,43 +26,57 @@ def get_lists(name_prefix: str):
     logger.debug(f"[get_lists] {r.status_code}")
 
     if r.status_code != 200:
-        print("Cloudflare API response:", r.text)
+        logger.error(f"Cloudflare API response: {r.text}")
         raise Exception("Failed to get Cloudflare lists")
 
     lists = r.json()["result"] or []
-
-    return [l for l in lists if l["name"].startswith(name_prefix)]
+    filtered_lists = [l for l in lists if l["name"].startswith(name_prefix)]
+    logger.info(f"Found {len(filtered_lists)} lists with prefix {name_prefix}")
+    return filtered_lists
 
 
 def create_list(name: str, domains: List[str]):
-    r = session.post(
-        f"https://api.cloudflare.com/client/v4/accounts/{CF_IDENTIFIER}/gateway/lists",
-        json={
-            "name": name,
-            "description": "Created by script.",
-            "type": "DOMAIN",
-            "items": [*map(lambda d: {"value": d}, domains)],
-        },
-    )
+    try:
+        r = session.post(
+            f"https://api.cloudflare.com/client/v4/accounts/{CF_IDENTIFIER}/gateway/lists",
+            json={
+                "name": name,
+                "description": "Created by script.",
+                "type": "DOMAIN",
+                "items": [*map(lambda d: {"value": d}, domains)],
+            },
+        )
 
-    logger.debug(f"[create_list] {r.status_code}")
+        logger.debug(f"[create_list] {r.status_code}")
 
-    if r.status_code != 200:
-        raise Exception("Failed to create Cloudflare list: " + str(r.content))
-    print ("Created list " + name)
-    return r.json()["result"]
+        if r.status_code != 200:
+            error_msg = f"Failed to create Cloudflare list: {str(r.content)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+            
+        print(f"Created list {name}")
+        return r.json()["result"]
+    except Exception as e:
+        logger.error(f"Error creating list {name}: {str(e)}")
+        raise
 
 
 def delete_list(list_id: str):
-    r = session.delete(
-        f"https://api.cloudflare.com/client/v4/accounts/{CF_IDENTIFIER}/gateway/lists/{list_id}",
-    )
+    try:
+        r = session.delete(
+            f"https://api.cloudflare.com/client/v4/accounts/{CF_IDENTIFIER}/gateway/lists/{list_id}",
+        )
 
-    logger.debug(f"[delete_list] {r.status_code}")
-    if r.status_code != 200:
-        raise Exception("Failed to delete Cloudflare list: " + str(r.content))
+        logger.debug(f"[delete_list] {r.status_code}")
+        if r.status_code != 200:
+            error_msg = f"Failed to delete Cloudflare list: {str(r.content)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
 
-    return r.json()["result"]
+        return r.json()["result"]
+    except Exception as e:
+        logger.error(f"Error deleting list {list_id}: {str(e)}")
+        raise
 
 
 def get_firewall_policies(name_prefix: str):

@@ -7,6 +7,13 @@ import configparser
 import pandas as pd
 import os
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
 class App:
     def __init__(self):        
         self.name_prefix = f"[CFPihole]"
@@ -42,14 +49,22 @@ class App:
 
         self.logger.info(f"Number of lists in Cloudflare: {len(cf_lists)}")
 
+        # If we have more than 290 lists, clean up old ones to make room
+        if len(cf_lists) > 290:
+            self.logger.warning("Too many lists, cleaning up old ones")
+            # Keep the most recent 200 lists
+            cf_lists.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+            lists_to_delete = cf_lists[200:]
+            for l in lists_to_delete:
+                self.logger.info(f"Deleting old list {l['name']}")
+                cloudflare.delete_list(l["id"])
+            cf_lists = cf_lists[:200]
+
         # compare the lists size
         if len(unique_domains) == sum([l["count"] for l in cf_lists]):
             self.logger.warning("Lists are the same size, skipping")
-
         else:
-
             #delete the policy
-
             cf_policies = cloudflare.get_firewall_policies(self.name_prefix)            
             if len(cf_policies)>0:
                 cloudflare.delete_firewall_policy(cf_policies[0]["id"])
@@ -67,9 +82,15 @@ class App:
 
                 self.logger.info(f"Creating list {list_name}")
 
-                _list = cloudflare.create_list(list_name, chunk)
-
-                cf_lists.append(_list)
+                try:
+                    _list = cloudflare.create_list(list_name, chunk)
+                    cf_lists.append(_list)
+                except Exception as e:
+                    if "Maximum number of lists reached" in str(e):
+                        self.logger.error("Maximum number of lists reached. Please clean up some lists manually.")
+                        raise
+                    else:
+                        raise
 
         # get the gateway policies
         cf_policies = cloudflare.get_firewall_policies(self.name_prefix)
@@ -79,17 +100,12 @@ class App:
         # setup the gateway policy
         if len(cf_policies) == 0:
             self.logger.info("Creating firewall policy")
-
             cf_policies = cloudflare.create_gateway_policy(f"{self.name_prefix} Block Ads", [l["id"] for l in cf_lists])
-
         elif len(cf_policies) != 1:
             self.logger.error("More than one firewall policy found")
-
             raise Exception("More than one firewall policy found")
-
         else:
             self.logger.info("Updating firewall policy")
-
             cloudflare.update_gateway_policy(f"{self.name_prefix} Block Ads", cf_policies[0]["id"], [l["id"] for l in cf_lists])
 
         self.logger.info("Done")
@@ -99,7 +115,7 @@ class App:
         if len(hostname) > 255:
             return False
         hostname = hostname.rstrip(".")
-        allowed = re.compile('^[a-z0-9]([a-z0-9\-\_]{0,61}[a-z0-9])?$',re.IGNORECASE)
+        allowed = re.compile(r'^[a-z0-9]([a-z0-9\-_]{0,61}[a-z0-9])?$', re.IGNORECASE)
         labels = hostname.split(".")
         
         # the TLD must not be all-numeric
@@ -108,61 +124,71 @@ class App:
         
         return all(allowed.match(x) for x in labels)
 
-
-
     def download_file(self, url, name):
         self.logger.info(f"Downloading file from {url}")
 
-        r = requests.get(url, allow_redirects=True)
+        try:
+            r = requests.get(url, allow_redirects=True, timeout=30)
+            r.raise_for_status()  # Raise an exception for bad status codes
 
-        path = pathlib.Path("tmp/" + name)
-        open(path, "wb").write(r.content)
+            path = pathlib.Path("tmp/" + name)
+            open(path, "wb").write(r.content)
 
-        self.logger.info(f"File size: {path.stat().st_size}")
+            self.logger.info(f"File size: {path.stat().st_size} bytes")
+        except Exception as e:
+            self.logger.error(f"Error downloading {url}: {str(e)}")
+            raise
 
     def convert_to_domain_list(self, file_name: str):
-        with open("tmp/"+file_name, "r", encoding="utf-8") as f:
-            data = f.read()
+        self.logger.info(f"Converting {file_name} to domain list")
+        try:
+            with open("tmp/"+file_name, "r", encoding="utf-8") as f:
+                data = f.read()
 
-        # check if the file is a hosts file or a list of domain
-        is_hosts_file = False
-        for ip in ["localhost", "127.0.0.1", "::1", "0.0.0.0"]:
-            if ip in data:
-                is_hosts_file = True
-                break
+            # check if the file is a hosts file or a list of domain
+            is_hosts_file = False
+            for ip in ["localhost", "127.0.0.1", "::1", "0.0.0.0"]:
+                if ip in data:
+                    is_hosts_file = True
+                    break
 
-        domains = []
-        for line in data.splitlines():
+            domains = []
+            total_lines = len(data.splitlines())
+            processed_lines = 0
 
-            # skip comments and empty lines
-            if line.startswith("#") or line.startswith(";") or line == "\n" or line.strip() == "":
-                continue
+            for line in data.splitlines():
+                processed_lines += 1
+                if processed_lines % 1000 == 0:
+                    self.logger.info(f"Processing line {processed_lines}/{total_lines} of {file_name}")
 
-            if is_hosts_file:
-                parts = line.split()
-                if len(parts) < 2:
-                    continue  # Bỏ qua dòng không hợp lệ
-                domain = parts[1].rstrip()
-
-                # skip the localhost entry
-                if domain == "localhost":
+                # skip comments and empty lines
+                if line.startswith("#") or line.startswith(";") or line == "\n" or line.strip() == "":
                     continue
 
-            else:
-                domain = line.rstrip()
+                if is_hosts_file:
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    domain = parts[1].rstrip()
 
-            #Check whitelist và hợp lệ
-            if domain in self.whitelist:
-                continue
-            if not self.is_valid_hostname(domain):
-                continue
-            domains.append(domain)
+                    # skip the localhost entry
+                    if domain == "localhost":
+                        continue
+                else:
+                    domain = line.rstrip()
 
-        self.logger.info(f"Number of domains: {len(domains)}")
+                #Check whitelist và hợp lệ
+                if domain in self.whitelist:
+                    continue
+                if not self.is_valid_hostname(domain):
+                    continue
+                domains.append(domain)
 
-        return domains
-
-
+            self.logger.info(f"Found {len(domains)} valid domains in {file_name}")
+            return domains
+        except Exception as e:
+            self.logger.error(f"Error processing {file_name}: {str(e)}")
+            raise
 
     def chunk_list(self, _list: List[str], n: int):
         for i in range(0, len(_list), n):
