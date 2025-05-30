@@ -134,14 +134,15 @@ class App:
         domains = []
         for line in data.splitlines():
 
-            
             # skip comments and empty lines
-            if line.startswith("#") or line.startswith(";") or line == "\n" or line == "":
+            if line.startswith("#") or line.startswith(";") or line == "\n" or line.strip() == "":
                 continue
 
             if is_hosts_file:
-                # remove the ip address and the trailing newline
-                domain = line.split()[1].rstrip()
+                parts = line.split()
+                if len(parts) < 2:
+                    continue  # Bỏ qua dòng không hợp lệ
+                domain = parts[1].rstrip()
 
                 # skip the localhost entry
                 if domain == "localhost":
@@ -154,7 +155,6 @@ class App:
             if domain in self.whitelist:
                 continue
             
-
             domains.append(domain)
 
         self.logger.info(f"Number of domains: {len(domains)}")
