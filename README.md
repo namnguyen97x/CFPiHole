@@ -14,4 +14,14 @@ Simple python script, runnable from GHA, that allows importing PiHole domain blo
     * `CF_IDENTIFIER` with Account ID
     * `CF_API_TOKEN` with API Token
 5. Modify `config.ini` with your preferred blocking lists
-6. Enable action
+6. Repo → Settings → Secrets and variables → Actions
+Bấm New repository secret
+input:
+Name: CF_API_TOKEN
+Value: (paste token)
+Add secret
+repeat:
+Name: CF_IDENTIFIER
+Value: (paste account id)
+Press Add secret
+7. Enable action
