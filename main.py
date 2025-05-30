@@ -6,6 +6,7 @@ import cloudflare
 import configparser
 import pandas as pd
 import os
+from datetime import datetime, timedelta
 
 # Configure logging
 logging.basicConfig(
@@ -19,51 +20,67 @@ class App:
         self.name_prefix = f"[CFPihole]"
         self.logger = logging.getLogger("main")
         self.whitelist = self.loadWhitelist()
+        self.max_chunk_size = 5000  # Increased to 5000 domains per list (well below 10,000 limit)
+        self.max_lists = 90  # Reduced to 90 to stay well below 100 lists per policy limit
+        self.max_policies = 1  # Maximum number of policies to maintain
 
     def loadWhitelist(self):
         return open("whitelist.txt", "r").read().split("\n")
 
-    def run(self):
-        
-        config = configparser.ConfigParser()
-        config.read('config.ini')
-
-        #check tmp dir
-        os.makedirs("./tmp", exist_ok=True)
-
-        all_domains = []
-        for list in config["Lists"]:
-
-            print ("Setting list " +  list)
+    def cleanup_old_lists(self, cf_lists):
+        """Clean up old lists if we're approaching the limit"""
+        if len(cf_lists) >= self.max_lists:
+            self.logger.warning(f"Approaching list limit ({len(cf_lists)}/{self.max_lists}), cleaning up old lists")
             
-            name_prefix = f"[AdBlock-{list}]"
-
-            self.download_file(config["Lists"][list], list)
-            domains = self.convert_to_domain_list(list)
-            all_domains = all_domains + domains
-
-        unique_domains = pd.unique(all_domains)
-
-        # check if the list is already in Cloudflare
-        cf_lists = cloudflare.get_lists(self.name_prefix)
-
-        self.logger.info(f"Number of lists in Cloudflare: {len(cf_lists)}")
-
-        # If we have more than 290 lists, clean up old ones to make room
-        if len(cf_lists) > 290:
-            self.logger.warning("Too many lists, cleaning up old ones")
-            # Keep the most recent 200 lists
+            # Sort lists by creation date
             cf_lists.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-            lists_to_delete = cf_lists[200:]
+            
+            # Keep only the most recent lists
+            lists_to_keep = cf_lists[:self.max_lists - 10]  # Leave room for new lists
+            lists_to_delete = cf_lists[self.max_lists - 10:]
+            
             for l in lists_to_delete:
-                self.logger.info(f"Deleting old list {l['name']}")
-                cloudflare.delete_list(l["id"])
-            cf_lists = cf_lists[:200]
+                try:
+                    self.logger.info(f"Deleting old list {l['name']}")
+                    cloudflare.delete_list(l["id"])
+                except Exception as e:
+                    self.logger.error(f"Error deleting list {l['name']}: {str(e)}")
+            
+            return lists_to_keep
+        return cf_lists
 
-        # compare the lists size
-        if len(unique_domains) == sum([l["count"] for l in cf_lists]):
-            self.logger.warning("Lists are the same size, skipping")
-        else:
+    def run(self):
+        try:
+            config = configparser.ConfigParser()
+            config.read('config.ini')
+
+            #check tmp dir
+            os.makedirs("./tmp", exist_ok=True)
+
+            all_domains = []
+            for list in config["Lists"]:
+                print ("Setting list " +  list)
+                name_prefix = f"[AdBlock-{list}]"
+
+                self.download_file(config["Lists"][list], list)
+                domains = self.convert_to_domain_list(list)
+                all_domains = all_domains + domains
+
+            unique_domains = pd.unique(all_domains)
+            self.logger.info(f"Total unique domains: {len(unique_domains)}")
+
+            # check if the list is already in Cloudflare
+            cf_lists = cloudflare.get_lists(self.name_prefix)
+            self.logger.info(f"Number of existing lists in Cloudflare: {len(cf_lists)}")
+
+            # Clean up old lists if needed
+            cf_lists = self.cleanup_old_lists(cf_lists)
+
+            # compare the lists size
+            if len(unique_domains) == sum([l["count"] for l in cf_lists]):
+                self.logger.info("Lists are up to date, no changes needed")
+                return
+
             #delete the policy
             cf_policies = cloudflare.get_firewall_policies(self.name_prefix)            
             if len(cf_policies)>0:
@@ -76,39 +93,47 @@ class App:
 
             cf_lists = []
 
-            # chunk the domains into lists of 1000 and create them
-            for chunk in self.chunk_list(unique_domains, 1000):
-                list_name = f"{self.name_prefix} {len(cf_lists) + 1}"
+            # chunk the domains into larger lists
+            chunks = list(self.chunk_list(unique_domains, self.max_chunk_size))
+            self.logger.info(f"Creating {len(chunks)} chunks of domains")
 
-                self.logger.info(f"Creating list {list_name}")
+            for i, chunk in enumerate(chunks, 1):
+                list_name = f"{self.name_prefix} {i}/{len(chunks)}"
+                self.logger.info(f"Creating list {list_name} with {len(chunk)} domains")
 
                 try:
                     _list = cloudflare.create_list(list_name, chunk)
                     cf_lists.append(_list)
                 except Exception as e:
                     if "Maximum number of lists reached" in str(e):
-                        self.logger.error("Maximum number of lists reached. Please clean up some lists manually.")
-                        raise
+                        self.logger.error("Maximum number of lists reached. Cleaning up and retrying...")
+                        cf_lists = self.cleanup_old_lists(cf_lists)
+                        # Retry creating the list
+                        _list = cloudflare.create_list(list_name, chunk)
+                        cf_lists.append(_list)
                     else:
                         raise
 
-        # get the gateway policies
-        cf_policies = cloudflare.get_firewall_policies(self.name_prefix)
+            # get the gateway policies
+            cf_policies = cloudflare.get_firewall_policies(self.name_prefix)
+            self.logger.info(f"Number of policies in Cloudflare: {len(cf_policies)}")
 
-        self.logger.info(f"Number of policies in Cloudflare: {len(cf_policies)}")
+            # setup the gateway policy
+            if len(cf_policies) == 0:
+                self.logger.info("Creating firewall policy")
+                cf_policies = cloudflare.create_gateway_policy(f"{self.name_prefix} Block Ads", [l["id"] for l in cf_lists])
+            elif len(cf_policies) != 1:
+                self.logger.error("More than one firewall policy found")
+                raise Exception("More than one firewall policy found")
+            else:
+                self.logger.info("Updating firewall policy")
+                cloudflare.update_gateway_policy(f"{self.name_prefix} Block Ads", cf_policies[0]["id"], [l["id"] for l in cf_lists])
 
-        # setup the gateway policy
-        if len(cf_policies) == 0:
-            self.logger.info("Creating firewall policy")
-            cf_policies = cloudflare.create_gateway_policy(f"{self.name_prefix} Block Ads", [l["id"] for l in cf_lists])
-        elif len(cf_policies) != 1:
-            self.logger.error("More than one firewall policy found")
-            raise Exception("More than one firewall policy found")
-        else:
-            self.logger.info("Updating firewall policy")
-            cloudflare.update_gateway_policy(f"{self.name_prefix} Block Ads", cf_policies[0]["id"], [l["id"] for l in cf_lists])
+            self.logger.info("Done")
 
-        self.logger.info("Done")
+        except Exception as e:
+            self.logger.error(f"Error in run(): {str(e)}")
+            raise
 
     def is_valid_hostname(self, hostname):
         import re
