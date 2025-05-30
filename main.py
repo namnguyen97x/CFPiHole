@@ -20,7 +20,7 @@ class App:
         self.name_prefix = f"[CFPihole]"
         self.logger = logging.getLogger("main")
         self.whitelist = self.loadWhitelist()
-        self.max_chunk_size = 5000  # Increased to 5000 domains per list (well below 10,000 limit)
+        self.max_chunk_size = 1000  # Cloudflare's limit is 1000 items per list
         self.max_lists = 90  # Reduced to 90 to stay well below 100 lists per policy limit
         self.max_policies = 1  # Maximum number of policies to maintain
 
