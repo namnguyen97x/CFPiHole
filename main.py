@@ -121,7 +121,7 @@ class App:
         self.logger.info(f"File size: {path.stat().st_size}")
 
     def convert_to_domain_list(self, file_name: str):
-        with open("tmp/"+file_name, "r") as f:
+        with open("tmp/"+file_name, "r", encoding="utf-8") as f:
             data = f.read()
 
         # check if the file is a hosts file or a list of domain
@@ -151,10 +151,11 @@ class App:
             else:
                 domain = line.rstrip()
 
-            #Check whitelist
+            #Check whitelist và hợp lệ
             if domain in self.whitelist:
                 continue
-            
+            if not self.is_valid_hostname(domain):
+                continue
             domains.append(domain)
 
         self.logger.info(f"Number of domains: {len(domains)}")
